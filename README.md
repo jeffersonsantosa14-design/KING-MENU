@@ -1,303 +1,359 @@
--- KING MENU | LocalScript
--- ProtÃ³tipo para uso no seu prÃ³prio jogo Roblox
+--[[
+=====================================================================
+ MENU DE ADMIN PARA ROBLOX (para o SEU jogo)
+=====================================================================
+ InstalaÃ§Ã£o no Roblox Studio:
+
+ 1) ServerScriptService  -> Script       chamado  "AdminMenuServer"
+    (cole a PARTE 1)
+
+ 2) StarterPlayer > StarterPlayerScripts -> LocalScript chamado "AdminMenuClient"
+    (cole a PARTE 2)
+
+ Coloque seu UserId na tabela ADMINS (parte 1).
+ Tecla para abrir/fechar o menu: M
+=====================================================================
+]]
+
+
+--====================================================================
+-- PARTE 1: SCRIPT (ServerScriptService/AdminMenuServer)
+--====================================================================
 
 local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Debris = game:GetService("Debris")
+
+-- Coloque aqui os UserIds de quem pode usar o menu
+local ADMINS = {
+	[1234567890] = true, -- troque pelo seu UserId
+}
+
+local CAR_SEARCH_RADIUS = 60   -- distÃ¢ncia mÃ¡xima para achar um carro perto
+local LIFT_SPEED = 80          -- velocidade ao "levantar" o carro
+local MOON_SPEED = 500         -- velocidade ao "jogar para a lua"
+local DELETE_CAR_AFTER_MOON = true
+local MOON_LIFETIME = 8        -- segundos atÃ© o carro sumir
+
+local remote = ReplicatedStorage:FindFirstChild("AdminAction")
+if not remote then
+	remote = Instance.new("RemoteEvent")
+	remote.Name = "AdminAction"
+	remote.Parent = ReplicatedStorage
+end
+
+local function isAdmin(player)
+	return ADMINS[player.UserId] == true or RunService:IsStudio()
+end
+
+Players.PlayerAdded:Connect(function(player)
+	player:SetAttribute("IsAdmin", isAdmin(player))
+end)
+for _, p in ipairs(Players:GetPlayers()) do
+	p:SetAttribute("IsAdmin", isAdmin(p))
+end
+
+-- Acha o carro em que o jogador estÃ¡ sentado ou o mais prÃ³ximo
+local function findCarSeat(player)
+	local char = player.Character
+	local hum = char and char:FindFirstChildOfClass("Humanoid")
+	local hrp = char and char:FindFirstChild("HumanoidRootPart")
+	if not (hum and hrp) then return nil end
+
+	if hum.SeatPart and hum.SeatPart:IsA("VehicleSeat") then
+		return hum.SeatPart
+	end
+
+	local best, bestDist = nil, CAR_SEARCH_RADIUS
+	for _, inst in ipairs(workspace:GetDescendants()) do
+		if inst:IsA("VehicleSeat") then
+			local d = (inst.Position - hrp.Position).Magnitude
+			if d < bestDist then
+				best, bestDist = inst, d
+			end
+		end
+	end
+	return best
+end
+
+local function launchCar(player, speed, antiGravity)
+	local seat = findCarSeat(player)
+	if not seat then return end
+
+	local root = seat.AssemblyRootPart or seat
+	pcall(function() root:SetNetworkOwner(nil) end)
+
+	root.AssemblyLinearVelocity = Vector3.new(0, speed, 0)
+
+	if antiGravity then
+		-- Cancela a gravidade para o carro continuar subindo
+		local att = Instance.new("Attachment")
+		att.Parent = root
+		local force = Instance.new("VectorForce")
+		force.Attachment0 = att
+		force.RelativeTo = Enum.ActuatorRelativeTo.World
+		force.ApplyAtCenterOfMass = true
+		force.Force = Vector3.new(0, root.AssemblyMass * workspace.Gravity, 0)
+		force.Parent = root
+
+		if DELETE_CAR_AFTER_MOON then
+			local model = seat:FindFirstAncestorOfClass("Model")
+			if model and model ~= workspace then
+				Debris:AddItem(model, MOON_LIFETIME)
+			end
+		else
+			Debris:AddItem(force, MOON_LIFETIME)
+			Debris:AddItem(att, MOON_LIFETIME)
+		end
+	end
+end
+
+local function teleportToPlayer(admin, targetName)
+	if typeof(targetName) ~= "string" or #targetName == 0 then return end
+	targetName = targetName:lower()
+
+	local target
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= admin and (p.Name:lower():sub(1, #targetName) == targetName
+			or p.DisplayName:lower():sub(1, #targetName) == targetName) then
+			target = p
+			break
+		end
+	end
+	if not target then return end
+
+	local myHRP = admin.Character and admin.Character:FindFirstChild("HumanoidRootPart")
+	local theirHRP = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+	if myHRP and theirHRP then
+		myHRP.CFrame = theirHRP.CFrame * CFrame.new(0, 0, 5)
+	end
+end
+
+remote.OnServerEvent:Connect(function(player, action, arg)
+	if not isAdmin(player) then return end -- seguranÃ§a: sÃ³ admins
+
+	if action == "LiftCar" then
+		launchCar(player, LIFT_SPEED, false)
+	elseif action == "MoonCar" then
+		launchCar(player, MOON_SPEED, true)
+	elseif action == "TeleportToPlayer" then
+		teleportToPlayer(player, arg)
+	end
+end)
+
+
+--====================================================================
+-- PARTE 2: LOCALSCRIPT (StarterPlayerScripts/AdminMenuClient)
+--====================================================================
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 
 local player = Players.LocalPlayer
-local playerGui = player:WaitForChild("PlayerGui")
+local camera = workspace.CurrentCamera
+local remote = ReplicatedStorage:WaitForChild("AdminAction")
 
--- CONFIGURAÃ‡Ã•ES
-local MENU_KEY = Enum.KeyCode.K
-local DEMO_KEY = "KING-2026-VIP"
+-- Espera o servidor confirmar que vocÃª Ã© admin
+local t = 0
+while player:GetAttribute("IsAdmin") == nil and t < 5 do
+	t += task.wait(0.1)
+end
+if not player:GetAttribute("IsAdmin") then return end
 
-local ESP_ENABLED = false
-local AIM_ENABLED = false
-local menuUnlocked = false
+local TOGGLE_KEY = Enum.KeyCode.M
+local AIM_FOV_PIXELS = 250
+local AIM_SMOOTHNESS = 0.35 -- 0 a 1 (maior = mais rÃ¡pido)
 
--- LOCAIS DE TELEPORTE (ALTERE AS COORDENADAS)
-local LOCATIONS = {
-    BASE = Vector3.new(0, 5, 0),
-    AEROPORTO = Vector3.new(100, 5, 100),
-    GARAGEM = Vector3.new(200, 5, 100),
-    PRAIA = Vector3.new(300, 5, 100)
-}
+local espEnabled = false
+local aimEnabled = false
 
--- GUI
+-- ============ GUI ============
 local gui = Instance.new("ScreenGui")
-gui.Name = "KingMenu"
+gui.Name = "AdminMenu"
 gui.ResetOnSpawn = false
-gui.Parent = playerGui
+gui.Enabled = false
+gui.Parent = player:WaitForChild("PlayerGui")
 
 local frame = Instance.new("Frame")
-frame.Size = UDim2.fromOffset(300, 470)
-frame.Position = UDim2.new(0.5, -150, 0.5, -235)
-frame.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+frame.Size = UDim2.fromOffset(240, 330)
+frame.Position = UDim2.fromOffset(20, 120)
+frame.BackgroundColor3 = Color3.fromRGB(25, 25, 30)
 frame.BorderSizePixel = 0
-frame.Visible = true
+frame.Active = true
+frame.Draggable = true
 frame.Parent = gui
-
-local corner = Instance.new("UICorner")
-corner.CornerRadius = UDim.new(0, 12)
-corner.Parent = frame
-
-local stroke = Instance.new("UIStroke")
-stroke.Color = Color3.fromRGB(220, 175, 40)
-stroke.Thickness = 2
-stroke.Parent = frame
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
 
 local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, 0, 0, 45)
+title.Size = UDim2.new(1, 0, 0, 36)
 title.BackgroundTransparency = 1
-title.Text = "ðŸ‘‘ KING MENU"
-title.TextColor3 = Color3.fromRGB(255, 205, 60)
+title.Text = "Menu Admin  [M]"
+title.TextColor3 = Color3.new(1, 1, 1)
 title.Font = Enum.Font.GothamBold
-title.TextSize = 23
+title.TextSize = 16
 title.Parent = frame
 
-local function createButton(parent, text, position, size)
-    local button = Instance.new("TextButton")
-    button.Size = size or UDim2.new(1, -20, 0, 34)
-    button.Position = position
-    button.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-    button.TextColor3 = Color3.fromRGB(255, 220, 120)
-    button.Text = text
-    button.Font = Enum.Font.GothamBold
-    button.TextSize = 13
-    button.AutoButtonColor = true
-    button.Parent = parent
-
-    local c = Instance.new("UICorner")
-    c.CornerRadius = UDim.new(0, 7)
-    c.Parent = button
-
-    return button
-end
-
--- TELA DE CHAVE (DEMONSTRAÃ‡ÃƒO)
-local keyBox = Instance.new("TextBox")
-keyBox.Size = UDim2.new(1, -30, 0, 38)
-keyBox.Position = UDim2.fromOffset(15, 55)
-keyBox.PlaceholderText = "Digite sua chave..."
-keyBox.Text = ""
-keyBox.TextColor3 = Color3.new(1, 1, 1)
-keyBox.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
-keyBox.Font = Enum.Font.Gotham
-keyBox.TextSize = 14
-keyBox.Parent = frame
-
-local keyCorner = Instance.new("UICorner")
-keyCorner.CornerRadius = UDim.new(0, 7)
-keyCorner.Parent = keyBox
-
-local status = Instance.new("TextLabel")
-status.Size = UDim2.new(1, -20, 0, 25)
-status.Position = UDim2.fromOffset(10, 96)
-status.BackgroundTransparency = 1
-status.Text = "Aguardando chave..."
-status.TextColor3 = Color3.fromRGB(255, 200, 60)
-status.Font = Enum.Font.Gotham
-status.TextSize = 12
-status.Parent = frame
-
-local content = Instance.new("Frame")
-content.Size = UDim2.new(1, -20, 1, -135)
-content.Position = UDim2.fromOffset(10, 130)
-content.BackgroundTransparency = 1
-content.Visible = false
-content.Parent = frame
-
 local layout = Instance.new("UIListLayout")
-layout.Padding = UDim.new(0, 5)
-layout.SortOrder = Enum.SortOrder.LayoutOrder
-layout.Parent = content
+layout.Padding = UDim.new(0, 8)
+layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+layout.Parent = frame
 
-local function addMenuButton(text, callback)
-    local button = createButton(
-        content,
-        text,
-        UDim2.new(),
-        UDim2.new(1, 0, 0, 32)
-    )
-    button.LayoutOrder = #content:GetChildren()
-    button.MouseButton1Click:Connect(callback)
-    return button
+local pad = Instance.new("UIPadding")
+pad.PaddingTop = UDim.new(0, 40)
+pad.Parent = frame
+
+local function makeButton(text, callback)
+	local b = Instance.new("TextButton")
+	b.Size = UDim2.new(1, -24, 0, 36)
+	b.BackgroundColor3 = Color3.fromRGB(50, 50, 60)
+	b.TextColor3 = Color3.new(1, 1, 1)
+	b.Font = Enum.Font.Gotham
+	b.TextSize = 14
+	b.Text = text
+	b.AutoButtonColor = true
+	b.Parent = frame
+	Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+	b.MouseButton1Click:Connect(function() callback(b) end)
+	return b
 end
 
-local function getCharacter()
-    return player.Character or player.CharacterAdded:Wait()
+local function setToggleVisual(button, label, on)
+	button.Text = label .. (on and ": ON" or ": OFF")
+	button.BackgroundColor3 = on and Color3.fromRGB(40, 130, 70) or Color3.fromRGB(50, 50, 60)
 end
 
-local function teleportTo(position)
-    local character = getCharacter()
-    local root = character:FindFirstChild("HumanoidRootPart")
-
-    if root then
-        character:PivotTo(CFrame.new(position + Vector3.new(0, 3, 0)))
-    end
-end
-
--- ESP
-local espObjects = {}
-
-local function clearESP()
-    for _, highlight in pairs(espObjects) do
-        if highlight then
-            highlight:Destroy()
-        end
-    end
-    table.clear(espObjects)
-end
-
-local function updateESP()
-    clearESP()
-
-    if not ESP_ENABLED then
-        return
-    end
-
-    for _, otherPlayer in ipairs(Players:GetPlayers()) do
-        if otherPlayer ~= player and otherPlayer.Character then
-            local highlight = Instance.new("Highlight")
-            highlight.FillColor = Color3.fromRGB(255, 190, 40)
-            highlight.OutlineColor = Color3.new(1, 1, 1)
-            highlight.Adornee = otherPlayer.Character
-            highlight.Parent = gui
-            table.insert(espObjects, highlight)
-        end
-    end
-end
-
--- AIMBOT DE TREINO: SOMENTE NPCs COM A TAG TrainingTarget
-local function getNearestTrainingTarget()
-    local myCharacter = player.Character
-    local myRoot = myCharacter and myCharacter:FindFirstChild("HumanoidRootPart")
-
-    if not myRoot then
-        return nil
-    end
-
-    local nearest = nil
-    local shortestDistance = math.huge
-
-    for _, object in ipairs(workspace:GetDescendants()) do
-        if object:IsA("Model")
-            and object:FindFirstChild("Humanoid")
-            and object:FindFirstChild("HumanoidRootPart")
-            and object:GetAttribute("TrainingTarget") == true then
-
-            local distance =
-                (object.HumanoidRootPart.Position - myRoot.Position).Magnitude
-
-            if distance < shortestDistance then
-                shortestDistance = distance
-                nearest = object
-            end
-        end
-    end
-
-    return nearest
-end
-
--- BOTÃ•ES
-local keyButton = createButton(
-    frame,
-    "VALIDAR CHAVE",
-    UDim2.fromOffset(15, 125),
-    UDim2.new(1, -30, 0, 34)
-)
-
-keyButton.MouseButton1Click:Connect(function()
-    if keyBox.Text == DEMO_KEY then
-        menuUnlocked = true
-        keyBox.Visible = false
-        keyButton.Visible = false
-        status.Text = "ACESSO LIBERADO!"
-        status.TextColor3 = Color3.fromRGB(70, 255, 100)
-        content.Visible = true
-    else
-        status.Text = "CHAVE INVÃLIDA!"
-        status.TextColor3 = Color3.fromRGB(255, 70, 70)
-    end
+-- ============ Carro ============
+makeButton("Levantar carro", function()
+	remote:FireServer("LiftCar")
 end)
 
-addMenuButton("AIMBOT TREINO: DESLIGADO", function(button)
-    AIM_ENABLED = not AIM_ENABLED
-    button.Text = AIM_ENABLED and "AIMBOT TREINO: LIGADO"
-        or "AIMBOT TREINO: DESLIGADO"
+makeButton("Jogar carro para a Lua", function()
+	remote:FireServer("MoonCar")
 end)
 
-addMenuButton("ESP: DESLIGADO", function(button)
-    ESP_ENABLED = not ESP_ENABLED
-    button.Text = ESP_ENABLED and "ESP: LIGADO" or "ESP: DESLIGADO"
-    updateESP()
-end)
+-- ============ ESP (Highlight) ============
+local highlights = {}
 
-addMenuButton("PUXAR ARMAS", function()
-    status.Text = "Configure os pontos de armas no seu jogo."
-end)
+local function addESP(plr)
+	if plr == player then return end
+	local char = plr.Character
+	if not char then return end
+	if highlights[plr] then highlights[plr]:Destroy() end
 
-addMenuButton("PEGAR CARROS", function()
-    status.Text = "Configure os veÃ­culos no seu jogo."
-end)
-
--- TP PARA JOGADORES: CICLA ENTRE OS JOGADORES DISPONÃVEIS
-local targetIndex = 0
-
-addMenuButton("TP JOGADORES: PRÃ“XIMO", function()
-    local targets = {}
-
-    for _, otherPlayer in ipairs(Players:GetPlayers()) do
-        if otherPlayer ~= player
-            and otherPlayer.Character
-            and otherPlayer.Character:FindFirstChild("HumanoidRootPart") then
-            table.insert(targets, otherPlayer)
-        end
-    end
-
-    if #targets == 0 then
-        status.Text = "NENHUM JOGADOR DISPONÃVEL."
-        return
-    end
-
-    targetIndex = (targetIndex % #targets) + 1
-    local target = targets[targetIndex]
-    local root = target.Character.HumanoidRootPart
-
-    teleportTo(root.Position + Vector3.new(4, 0, 0))
-    status.Text = "ALVO: " .. target.Name
-end)
-
--- TP PARA LUGARES
-for placeName, position in pairs(LOCATIONS) do
-    addMenuButton("TP " .. placeName, function()
-        teleportTo(position)
-        status.Text = "TELETRANSPORTE: " .. placeName
-    end)
+	local h = Instance.new("Highlight")
+	h.FillColor = Color3.fromRGB(255, 60, 60)
+	h.OutlineColor = Color3.new(1, 1, 1)
+	h.FillTransparency = 0.6
+	h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	h.Adornee = char
+	h.Parent = char
+	highlights[plr] = h
 end
 
--- AIMBOT DE TREINO: APENAS LOCALIZA O NPC MAIS PRÃ“XIMO
+local function removeESP(plr)
+	if highlights[plr] then
+		highlights[plr]:Destroy()
+		highlights[plr] = nil
+	end
+end
+
+local function refreshESP()
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if espEnabled then addESP(plr) else removeESP(plr) end
+	end
+end
+
+local function hookPlayer(plr)
+	plr.CharacterAdded:Connect(function()
+		task.wait(0.5)
+		if espEnabled then addESP(plr) end
+	end)
+end
+for _, plr in ipairs(Players:GetPlayers()) do hookPlayer(plr) end
+Players.PlayerAdded:Connect(hookPlayer)
+Players.PlayerRemoving:Connect(removeESP)
+
+local espBtn
+espBtn = makeButton("ESP: OFF", function()
+	espEnabled = not espEnabled
+	setToggleVisual(espBtn, "ESP", espEnabled)
+	refreshESP()
+end)
+
+-- ============ Aimbot (segure o botÃ£o direito do mouse) ============
+local aimBtn
+aimBtn = makeButton("Aimbot: OFF", function()
+	aimEnabled = not aimEnabled
+	setToggleVisual(aimBtn, "Aimbot", aimEnabled)
+end)
+
+local function getClosestTarget()
+	local mousePos = UserInputService:GetMouseLocation()
+	local best, bestDist = nil, AIM_FOV_PIXELS
+
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	params.FilterDescendantsInstances = { player.Character }
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr ~= player and plr.Character then
+			local head = plr.Character:FindFirstChild("Head")
+			local hum = plr.Character:FindFirstChildOfClass("Humanoid")
+			if head and hum and hum.Health > 0 then
+				local screenPos, onScreen = camera:WorldToViewportPoint(head.Position)
+				if onScreen then
+					local d = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+					if d < bestDist then
+						-- checa se nÃ£o tem parede no meio
+						local dir = head.Position - camera.CFrame.Position
+						local hit = workspace:Raycast(camera.CFrame.Position, dir, params)
+						if not hit or hit.Instance:IsDescendantOf(plr.Character) then
+							best, bestDist = head, d
+						end
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
 RunService.RenderStepped:Connect(function()
-    if not AIM_ENABLED or not menuUnlocked then
-        return
-    end
+	if not aimEnabled then return end
+	if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
 
-    local target = getNearestTrainingTarget()
-    if target then
-        -- Ponto de integraÃ§Ã£o para cÃ¢mera de treino no seu prÃ³prio jogo.
-    end
+	local target = getClosestTarget()
+	if target then
+		local goal = CFrame.lookAt(camera.CFrame.Position, target.Position)
+		camera.CFrame = camera.CFrame:Lerp(goal, AIM_SMOOTHNESS)
+	end
 end)
 
--- TECLA K ABRE/FECHA
+-- ============ TP atÃ© jogador ============
+local box = Instance.new("TextBox")
+box.Size = UDim2.new(1, -24, 0, 32)
+box.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+box.TextColor3 = Color3.new(1, 1, 1)
+box.PlaceholderText = "Nome do jogador"
+box.PlaceholderColor3 = Color3.fromRGB(150, 150, 160)
+box.Font = Enum.Font.Gotham
+box.TextSize = 14
+box.Text = ""
+box.ClearTextOnFocus = false
+box.Parent = frame
+Instance.new("UICorner", box).CornerRadius = UDim.new(0, 8)
+
+makeButton("TP atÃ© jogador", function()
+	remote:FireServer("TeleportToPlayer", box.Text)
+end)
+
+-- ============ Abrir/fechar ============
 UserInputService.InputBegan:Connect(function(input, processed)
-    if processed then
-        return
-    end
-
-    if input.KeyCode == MENU_KEY and menuUnlocked then
-        frame.Visible = not frame.Visible
-    end
+	if processed then return end
+	if input.KeyCode == TOGGLE_KEY then
+		gui.Enabled = not gui.Enabled
+	end
 end)
-
-print("KING MENU carregado!")
